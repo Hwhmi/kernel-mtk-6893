@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Xiaomi chopin (Redmi Note 10 Pro / MT6891Z) board DTS
+ * Target: Linux 5.10.233  (Hwhmi/kernel-mtk-6893 @ mt6893-5.10)
+ *
+ * 板级数据来源：4.14 原厂 arch/arm64/boot/dts/mediatek/chopin-mt6891.dtsi
+ * 只取"板级差异"，SoC 内部一律使用 5.10 的 mt6893.dtsi（时钟 ID 两边不一致，不可互抄）
+ *
+ * 本轮目标：能启动、能挂分区、能出串口。以下内容**故意未包含**，因为它们
+ * 依赖的驱动不在 5.10 树里，等系统起来后再逐个补：
+ *   - 充电：bq2597x (master@65 / slave@66)、xmusb350@35、cp_qc30、usbpd_pm
+ *   - 电量计：bq27z561@55（TI gauge）
+ *   - 马达：aw8697_haptic@5a
+ *   - 相机 LDO：wl2866d1/d2（5.10 只有 wl2864c / wl2868c）
+ *   - 传感器、NFC、红外
+ */
+
+/dts-v1/;
+
+#include "mediatek/mt6893.dtsi"
+#include "mediatek/mt6359p.dtsi"
+#include "mediatek/mt6893-clkitg.dtsi"
+#include "mediatek/mt6893-disable-unused.dtsi"
+#include "mediatek/cust_mt6893_msdc.dtsi"
+
+/ {
+	model = "Xiaomi chopin";
+	compatible = "xiaomi,chopin", "mediatek,mt6893";
+
+	/*
+	 * memory 节点不写：MTK 由 lk 在启动时把真实 DRAM 布局写进 dtb
+	 * （4.14 原厂 dts 里也没有 memory 节点，同样原因）
+	 */
+
+	/* ================================================================
+	 * bring-up 阶段用 fixed regulator
+	 *
+	 * 原厂配置：
+	 *   屏 DVDD  <- wl2866d2_dvdd2 (I2C9, WL2866D)
+	 *   触控 VTP <- mt_pmic_vtp_ldo_reg
+	 *
+	 * 5.10 的实际情况：
+	 *   - regulator 目录只有 wl2864c / wl2868c，没有 wl2866d
+	 *   - mt6359p.dtsi 里没有 VTP LDO
+	 * 所以先用 always-on 的 fixed regulator 顶上。硬件上 lk 已经把这些电供好了，
+	 * 内核只是需要一个"合法对象"来满足 regulator_get()。
+	 * ================================================================ */
+
+	lcd_dvdd_fixed: regulator-lcd-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd-dvdd";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	vtouch_fixed: regulator-vtouch {
+		compatible = "regulator-fixed";
+		regulator-name = "vtouch";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * 屏偏置 ELVDD/ELVSS：ENP = GPIO126，ENN = GPIO148
+	 * 这里只把 ENP 拉高（fixed regulator 只能带一个 gpio）。
+	 * 如果点亮后发现偏置不足（画面暗/无显示），改成两路独立 regulator。
+	 */
+	lcd_bias: regulator-lcd-bias {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd-bias";
+		regulator-min-microvolt = <5500000>;
+		regulator-max-microvolt = <5500000>;
+		enable-active-high;
+		gpio = <&pio 126 0>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+/* ================================================================
+ * 串口：UART0 @ 0x11002000（早期调试）
+ * lk 传的 bootargs 里通常已带 earlycon，这里只保证节点可用
+ * ================================================================ */
+&uart0 {
+	status = "okay";
+};
+
+/* ================================================================
+ * UFS：5.10 的 mt6893.dtsi 里已经配好 8 个时钟 + 中断 + reset
+ * compatible 是 mainline 能认的 "mediatek,mt8183-ufshci"
+ * 这里只需要打开
+ * ================================================================ */
+&ufshci {
+	status = "okay";
+};
+
+/* ================================================================
+ * 触控主选：Goodix GT9886 (I2C0 @ 0x5d)
+ * reset = GPIO20, irq = GPIO21, 触摸区 1080x2280
+ *
+ * config 侧还需要：
+ *   CONFIG_TOUCHSCREEN_MTK_TOUCH="GT9886"
+ *   # CONFIG_TOUCHSCREEN_GOODIX is not set   ← 防止 mainline goodix.o 抢设备
+ * ================================================================ */
+&i2c0 {
+	clock-frequency = <400000>;
+	pinctrl-names = "default", "ts_int_active",
+		"ts_reset_active", "ts_int_suspend",
+		"ts_reset_suspend", "ts_i2c_mode";
+	pinctrl-0 = <&ctp_pins_default>;
+	pinctrl-1 = <&ctp_ts_int_active>;
+	pinctrl-2 = <&ctp_ts_reset_active>;
+	pinctrl-3 = <&ctp_ts_int_suspend>;
+	pinctrl-4 = <&ctp_ts_reset_suspend>;
+	pinctrl-5 = <&ctp_ts_i2c_mode>;
+	status = "okay";
+
+	gt9886@5d {
+		compatible = "goodix,gt9886";
+		reg = <0x5d>;
+		status = "okay";
+		interrupt-parent = <&pio>;
+		interrupts = <21 IRQ_TYPE_EDGE_FALLING 21 0>;
+		vtouch-supply = <&vtouch_fixed>;
+		goodix,reset-gpio = <&pio 20 0x0>;
+		goodix,irq-gpio = <&pio 21 0x0>;
+		goodix,irq-flags = <2>;
+		goodix,panel-max-id = <10>;
+		goodix,panel-max-x = <1080>;
+		goodix,panel-max-y = <2280>;
+		goodix,panel-max-w = <256>;
+		goodix,panel-max-p = <256>;
+		goodix,input-max-x = <1080>;
+		goodix,input-max-y = <2280>;
+		goodix,panel-key-map = <158 172 217>;
+		goodix,power-on-delay-us = <10000>;
+		goodix,power-off-delay-us = <5000>;
+		goodix,firmware-version = "6893v01";
+		goodix,config-version = "6893v01";
+		goodix,pen-enable;
+		goodix,key-of-pen = <331 332>;
+		tpd-filter-enable = <0>;
+		tpd-filter-pixel-density = <161>;
+		tpd-filter-custom-prameters = <0 0 0 0 0 0 0 0 0 0 0 0>;
+		tpd-filter-custom-speed = <0 0 0>;
+	};
+};
+
+/* ================================================================
+ * 触控备选：Novatek NT36672C (SPI0)
+ *
+ * 原厂 dts 里 SPI0 上挂的是 novatek,NVT-ts-spi，固件名
+ * "novatek_nt36672c_k10a_fw01.bin"（tianma）/ fw02（csot）。
+ * 说明 chopin 有两种触控物料，按批次不同。
+ *
+ * 如果 GT9886 在 0x5d 上扫描不到（i2cdetect 无响应），把下面这段
+ * 取消注释，并把 CONFIG_TOUCHSCREEN_MTK_TOUCH 改成 "NT36672C"
+ * ================================================================ */
+/*
+&spi0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	mediatek,pad-select = <1>;
+	mediatek,kthread-rt = <1>;
+
+	ts_novatek@0 {
+		compatible = "novatek,NVT-ts-spi";
+		reg = <0>;
+		status = "okay";
+		spi-max-frequency = <9600000>;
+		novatek,irq-gpio = <&pio 19 0x2001>;
+		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";
+		pinctrl-0 = <&ts_int_active &ts_cs_active>;
+		pinctrl-1 = <&ts_int_suspend &ts_cs_suspend>;
+		novatek,swrst-n8-addr = <0x03F0FE>;
+		novatek,spi-rd-fast-addr = <0x03F310>;
+		novatek,config-array-size = <2>;
+		novatek,cfg_0 {
+			novatek,tp-vendor = <0x46>;
+			novatek,display-maker = <0x36>;
+			novatek,fw-name = "novatek_nt36672c_k10a_fw01.bin";
+			novatek,mp-name = "novatek_nt36672c_k10a_mp01.bin";
+			novatek,clicknum-file-name = "nvt+tianma";
+		};
+		novatek,cfg_1 {
+			novatek,tp-vendor = <0x53>;
+			novatek,display-maker = <0x42>;
+			novatek,fw-name = "novatek_nt36672c_k10a_fw02.bin";
+			novatek,mp-name = "novatek_nt36672c_k10a_mp02.bin";
+			novatek,clicknum-file-name = "nvt+csot";
+		};
+	};
+};
+*/
+
+/* ================================================================
+ * 显示：DSI0 + 通用 panel
+ *
+ * 驱动：drivers/gpu/drm/panel/mtk-drm-general-panel-driver.c
+ * compatible 必须是 "mtk,general,panel"（实测该驱动的 of_match）
+ *
+ * ！！！关键缺口！！！
+ * 面板初始化序列（lcm-init-cmd）、时序、DSC 参数都还没有。
+ * k10a_42_02_0b_dsc_vdo 的驱动源码不在任何公开 4.14 树里。
+ * 没有这些参数，panel 节点会 probe 但点不亮。
+ * 拿到参数后填进下面标 TODO 的位置。
+ * ================================================================ */
+&dsi0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	panel@0 {
+		compatible = "mtk,general,panel";
+		reg = <0>;
+		status = "okay";
+
+		reset-gpios = <&pio 42 0>;	/* 原厂 lcm_rst = GPIO42 */
+		dvdd-supply = <&lcd_dvdd_fixed>;
+
+		/* ---- TODO: 以下全部需要从 panel 规格/驱动里补 ----
+		 *
+		 * lcm-init-cmd = /bits/ 8 < ... >;     初始化序列
+		 * lcm-deinit-cmd = /bits/ 8 < ... >;
+		 * backlight-setting-cmd = /bits/ 8 < ... >;
+		 *
+		 * panel-ext-param-setting {
+		 *	ext-param-data_rate_khz = <...>;
+		 *	ext-param-physical_width_um = <...>;
+		 *	ext-param-physical_height_um = <...>;
+		 *	ext-param-phy_timcon_setting { ... };
+		 *	ext-param-dsc_setting { ... };   屏带 DSC，需开启
+		 * };
+		 *
+		 * 分辨率为 1080 x 2400（物理），刷新率 60/90Hz
+		 */
+	};
+};
+
+/* ================================================================
+ * Pinctrl
+ * ================================================================ */
+&pio {
+	/* ---- 触控 GT9886 ---- */
+	ctp_pins_default: eintdefault {
+	};
+
+	ctp_ts_int_active: int_active {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO21__FUNC_GPIO21>;
+			input-enable;
+		};
+	};
+
+	ctp_ts_reset_active: reset_active {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO20__FUNC_GPIO20>;
+			output-high;
+		};
+	};
+
+	ctp_ts_int_suspend: int_suspend {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO21__FUNC_GPIO21>;
+			output-low;
+		};
+	};
+
+	ctp_ts_reset_suspend: reset_suspend {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO20__FUNC_GPIO20>;
+			output-low;
+		};
+	};
+
+	ctp_ts_i2c_mode: i2cmode_default {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO204__FUNC_SCL0>,
+				<PINMUX_GPIO205__FUNC_SDA0>;
+		};
+	};
+
+	/* ---- 触控 Novatek（备选，配上面注释段用） ---- */
+	ts_int_active: ts_int_active {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO19__FUNC_GPIO19>;
+			slew-rate = <0>;
+			bias-disable;
+		};
+	};
+
+	ts_int_suspend: ts_int_suspend {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO19__FUNC_GPIO19>;
+			slew-rate = <1>;
+			output-low;
+		};
+	};
+
+	ts_cs_active: ts_cs_active {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO169__FUNC_SPI0_B_CSB>,
+				<PINMUX_GPIO170__FUNC_SPI0_B_MI>;
+		};
+	};
+
+	ts_cs_suspend: ts_cs_suspend {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO169__FUNC_GPIO169>,
+				<PINMUX_GPIO170__FUNC_GPIO170>;
+			slew-rate = <1>;
+			bias-pull-down;
+			output-low;
+		};
+	};
+
+	/* ---- 屏：复位 / 偏置 / TE ---- */
+	lcm_rst_out1_gpio: lcm_rst_out1_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO42__FUNC_GPIO42>;
+			slew-rate = <1>;
+			output-high;
+		};
+	};
+
+	lcm_rst_out0_gpio: lcm_rst_out0_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO42__FUNC_GPIO42>;
+			slew-rate = <1>;
+			output-low;
+		};
+	};
+
+	lcd_bias_enp1_gpio: lcd_bias_enp1_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO126__FUNC_GPIO126>;
+			slew-rate = <1>;
+			output-high;
+		};
+	};
+
+	lcd_bias_enp0_gpio: lcd_bias_enp0_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO126__FUNC_GPIO126>;
+			slew-rate = <1>;
+			output-low;
+		};
+	};
+
+	lcd_bias_enn1_gpio: lcd_bias_enn1_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO148__FUNC_GPIO148>;
+			slew-rate = <1>;
+			output-high;
+		};
+	};
+
+	lcd_bias_enn0_gpio: lcd_bias_enn0_gpio {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO148__FUNC_GPIO148>;
+			slew-rate = <1>;
+			output-low;
+		};
+	};
+
+	lcm_dsi_te: lcm_dsi_te {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO41__FUNC_DSI_TE>;
+		};
+	};
+};
+
+/* ================================================================
+ * 显示子系统（mediatek_v2 / DISP v2）
+ *
+ * 注意：mediatek_v2/platform/ 里只有 MT6789 的平台数据，没有 MT6893。
+ * 若 dsi0 probe 报错或无 DDP 组件，需要补 mtk_drm_6893 平台数据，
+ * 参考 mainline 的 42 补丁系列（Angelo Del Regno, 2026-07）里的
+ * mt6893_legacy_mtx_trig_ids[]。
+ * ================================================================ */
+&dispsys_config {
+	pinctrl-names = "lcm_rst_out1_gpio", "lcm_rst_out0_gpio", "mode_te_te";
+	pinctrl-0 = <&lcm_rst_out1_gpio>;
+	pinctrl-1 = <&lcm_rst_out0_gpio>;
+	pinctrl-2 = <&lcm_dsi_te>;
+	status = "okay";
+};
